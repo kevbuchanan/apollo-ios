@@ -143,17 +143,6 @@ public final class ApolloStore {
 
     fileprivate lazy var loader: DataLoader<CacheKey, Record?> = DataLoader(self.cache.loadRecords)
 
-    fileprivate func makeExecutor() -> GraphQLExecutor {
-      let executor = GraphQLExecutor { object, info in
-        let value = object[info.cacheKeyForField]
-        return self.complete(value: value)
-      }
-
-      executor.dispatchDataLoads = self.loader.dispatch
-      executor.cacheKeyForObject = self.cacheKeyForObject
-      return executor
-    }
-
     init(cache: NormalizedCache, cacheKeyForObject: CacheKeyForObject?) {
       self.cache = cache
       self.cacheKeyForObject = cacheKeyForObject
@@ -187,7 +176,15 @@ public final class ApolloStore {
 
     final func execute<Accumulator: GraphQLResultAccumulator>(selections: [GraphQLSelection], onObjectWithKey key: CacheKey, variables: GraphQLMap?, accumulator: Accumulator) throws -> Promise<Accumulator.FinalResult> {
       return loadObject(forKey: key).flatMap { object in
-        try self.makeExecutor().execute(selections: selections, on: object, withKey: key, variables: variables, accumulator: accumulator)
+        let executor = GraphQLExecutor { object, info in
+          let value = object[info.cacheKeyForField]
+          return self.complete(value: value)
+        }
+
+        executor.dispatchDataLoads = self.loader.dispatch
+        executor.cacheKeyForObject = self.cacheKeyForObject
+
+        return try executor.execute(selections: selections, on: object, withKey: key, variables: variables, accumulator: accumulator)
       }
     }
 
@@ -206,8 +203,8 @@ public final class ApolloStore {
     fileprivate var updateChangedKeysFunc: DidChangeKeysFunc?
 
     init(cache: NormalizedCache, cacheKeyForObject: CacheKeyForObject?, updateChangedKeysFunc: @escaping DidChangeKeysFunc) {
-        self.updateChangedKeysFunc = updateChangedKeysFunc
-        super.init(cache: cache, cacheKeyForObject: cacheKeyForObject)
+      self.updateChangedKeysFunc = updateChangedKeysFunc
+      super.init(cache: cache, cacheKeyForObject: cacheKeyForObject)
     }
 
     public func update<Query: GraphQLQuery>(query: Query, _ body: (inout Query.Data) throws -> Void) throws {
@@ -232,12 +229,19 @@ public final class ApolloStore {
 
     private func write(object: JSONObject, forSelections selections: [GraphQLSelection], withKey key: CacheKey, variables: GraphQLMap?) throws {
       let normalizer = GraphQLResultNormalizer()
-      try self.makeExecutor().execute(selections: selections, on: object, withKey: key, variables: variables, accumulator: normalizer)
+
+      let executor = GraphQLExecutor { object, info in
+        return .result(.success(object[info.responseKeyForField]))
+      }
+
+      executor.cacheKeyForObject = self.cacheKeyForObject
+
+      try executor.execute(selections: selections, on: object, withKey: key, variables: variables, accumulator: normalizer)
       .flatMap {
         self.cache.merge(records: $0)
       }.andThen { changedKeys in
         if let didChangeKeysFunc = self.updateChangedKeysFunc {
-            didChangeKeysFunc(changedKeys, nil)
+          didChangeKeysFunc(changedKeys, nil)
         }
       }.wait()
     }
